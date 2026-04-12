@@ -7,6 +7,7 @@ all GIFs, MP4s, WEBPs, and WEBMs to a user-defined output directory.
 
 Usage:
     python discord_gif_exporter.py <har_file> <output_dir> [options]
+    python discord_gif_exporter.py <output_dir> --retry-failed <log_file> [options]
 
 Options:
     --dry-run           Print URLs and filenames without downloading
@@ -15,6 +16,7 @@ Options:
     --no-skip-existing  Re-download files even if they already exist
     --log-file PATH     Write structured log to this file (JSON Lines)
     --source FILTER     Only download from this source domain (e.g. tenor.com)
+    --retry-failed LOG  Retry failed downloads from a previous JSONL log
 
 Exit codes:
     0  All downloads succeeded (or dry-run completed)
@@ -210,6 +212,55 @@ def apply_source_filter(items: list[MediaItem], source_filter: Optional[str]) ->
     return [i for i in items if source_filter.lower() in i.source_domain.lower()]
 
 
+def load_failed_items(log_path: Path) -> list[MediaItem]:
+    """
+    Read a JSONL log file and reconstruct MediaItem objects from 'failed' entries.
+    Deduplicates by URL (keeps the last occurrence per dedupe_key).
+    """
+    items_by_key: dict[str, MediaItem] = {}
+
+    with open(log_path, encoding="utf-8") as f:
+        for line_num, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                logging.warning("Skipping malformed JSONL line %d", line_num)
+                continue
+
+            if record.get("event") != "failed":
+                continue
+
+            url = record.get("url", "")
+            filename = record.get("filename", "")
+            if not url or not filename:
+                logging.warning("Skipping incomplete failed entry at line %d", line_num)
+                continue
+
+            # Derive extension from filename
+            ext = None
+            for candidate in TARGET_EXTENSIONS:
+                if filename.lower().endswith(candidate):
+                    ext = candidate
+                    break
+            if ext is None:
+                logging.warning("Skipping unrecognized extension in '%s' at line %d", filename, line_num)
+                continue
+
+            parsed = urlparse(url)
+            item = MediaItem(
+                real_url=url,
+                filename=filename,
+                extension=ext,
+                source_domain=parsed.netloc,
+            )
+            items_by_key[item.dedupe_key] = item
+
+    return list(items_by_key.values())
+
+
 # ---------------------------------------------------------------------------
 # Filename collision handling
 # ---------------------------------------------------------------------------
@@ -351,7 +402,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Export Discord favorited GIFs/MP4s from a HAR file.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("har_file", type=Path, help="Path to the .har file from browser DevTools")
+    p.add_argument("har_file", nargs="?", type=Path, default=None,
+                   help="Path to the .har file from browser DevTools")
     p.add_argument("output_dir", type=Path, help="Directory where media files will be saved")
     p.add_argument("--dry-run", action="store_true", help="List files without downloading")
     p.add_argument("--concurrency", type=int, default=4, metavar="N",
@@ -365,6 +417,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--source", metavar="DOMAIN",
                    help="Filter to only download from this source domain (e.g. tenor.com)")
     p.add_argument("--verbose", action="store_true", help="Enable debug logging")
+    p.add_argument("--retry-failed", type=Path, metavar="LOG",
+                   help="Retry failed downloads from a previous JSONL log file")
     return p
 
 
@@ -375,10 +429,11 @@ def main() -> None:
     setup_logging(args.log_file, args.verbose)
     log = logging.getLogger(__name__)
 
-    # Validate inputs
-    if not args.har_file.exists():
-        log.critical("HAR file not found: %s", args.har_file)
-        sys.exit(2)
+    # Validate: exactly one of har_file or --retry-failed
+    if args.har_file and args.retry_failed:
+        parser.error("Cannot use both har_file and --retry-failed")
+    if not args.har_file and not args.retry_failed:
+        parser.error("Either har_file or --retry-failed is required")
 
     if not args.dry_run:
         try:
@@ -387,15 +442,30 @@ def main() -> None:
             log.critical("Cannot create output directory: %s", exc)
             sys.exit(2)
 
-    # Parse
-    log.info("Parsing HAR file: %s", args.har_file)
-    entries = load_har(args.har_file)
-    log.info("HAR contains %d total entries", len(entries))
-
-    items = extract_media_items(entries)
-    items = apply_source_filter(items, args.source)
-
-    log.info("Found %d unique media items", len(items))
+    if args.retry_failed:
+        # Retry mode: load failed items from JSONL log
+        if not args.retry_failed.exists():
+            log.critical("Log file not found: %s", args.retry_failed)
+            sys.exit(2)
+        log.info("Loading failed items from: %s", args.retry_failed)
+        try:
+            items = load_failed_items(args.retry_failed)
+        except OSError as exc:
+            log.critical("Cannot read log file: %s", exc)
+            sys.exit(2)
+        items = apply_source_filter(items, args.source)
+        log.info("Found %d failed items to retry", len(items))
+    else:
+        # Normal mode: parse HAR file
+        if not args.har_file.exists():
+            log.critical("HAR file not found: %s", args.har_file)
+            sys.exit(2)
+        log.info("Parsing HAR file: %s", args.har_file)
+        entries = load_har(args.har_file)
+        log.info("HAR contains %d total entries", len(entries))
+        items = extract_media_items(entries)
+        items = apply_source_filter(items, args.source)
+        log.info("Found %d unique media items", len(items))
 
     if not items:
         log.warning("No matching media found. Check --source filter or HAR content.")

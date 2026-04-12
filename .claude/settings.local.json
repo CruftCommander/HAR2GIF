@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import py_compile; py_compile.compile\\('main.py', doraise=True\\); print\\('Syntax OK'\\)\")",
+      "Bash(python main.py --help)",
+      "Bash(python main.py ./test_out)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(python main.py fake.har ./test_out --retry-failed fake.jsonl)",
+      "Bash(python main.py ./test_out --retry-failed /tmp/test_failures.jsonl --dry-run)",
+      "Bash(python main.py ./test_out --retry-failed /tmp/test_failures.jsonl --source tenor.com --dry-run)"
+    ]
+  }
+}
