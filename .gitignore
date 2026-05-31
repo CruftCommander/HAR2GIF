@@ -1,0 +1,12 @@
+# Bundled binaries — never commit these (see bin/README.md)
+bin/ffmpeg.exe
+bin/ffmpeg
+bin/chafa.exe
+bin/chafa
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
